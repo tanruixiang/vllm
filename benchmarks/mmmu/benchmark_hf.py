@@ -11,12 +11,10 @@ from transformers import AutoTokenizer, AutoModel, set_seed
 import torch
 from datasets import load_dataset
 from typing import Optional
-from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
-from vllm.utils import FlexibleArgumentParser
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from data_utils import construct_prompt, load_yaml, process_single_sample, CAT_SHORT2LONG, load_mmmu_dataset
-from eval_utils import parse_multi_choice_response, parse_open_response, evaluate
-
+from eval_utils import (parse_multi_choice_response, parse_open_response, evaluate,
+                       run_benchmark, load_benchmark_dataset, load_benchmark_config)
+from vllm.utils import FlexibleArgumentParser
 
 def load_model_and_tokenizer(model_path: str):
     """Load HuggingFace model and tokenizer"""
@@ -62,60 +60,24 @@ def generate_response(model, tokenizer, prompt: str, max_new_tokens: int = 512,
     
     return response.strip()
 
-def process_samples(model, tokenizer, samples: List[Dict], config: Dict, args) -> List[Dict]:
-    """Process samples and generate predictions"""
-    results = []
-    
-    # Set fixed seed for reproducibility
-    set_seed(args.seed)
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
-        torch.cuda.manual_seed_all(args.seed)
-    
-    for i, sample in enumerate(samples):
-        print(f"Processing sample {i+1}/{len(samples)}: {sample['id']}")
-        
-        # Construct prompt
-        prompt_data = construct_prompt(sample, config)
-        prompt = prompt_data['final_input_prompt']
-        
-        # Generate response
-        response = generate_response(
-            model, tokenizer, prompt,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            do_sample=args.do_sample,
-            seed=args.seed
-        )
-        
-        # Parse response based on question type
-        if sample['question_type'] == 'multiple-choice':
-            parsed_pred = parse_multi_choice_response(
-                response, 
-                prompt_data['all_choices'], 
-                prompt_data['index2ans']
+def hf_generate_func(model, tokenizer):
+    """Create a generation function for HuggingFace models that matches the common interface"""
+    def generate(prompts: List[str], generation_params) -> List[str]:
+        """Generate responses using HuggingFace model"""
+        responses = []
+        for prompt in prompts:
+            response = generate_response(
+                model, tokenizer, prompt,
+                max_new_tokens=generation_params.max_new_tokens,
+                temperature=generation_params.temperature,
+                top_p=generation_params.top_p,
+                do_sample=generation_params.do_sample,
+                seed=generation_params.seed
             )
-        else:
-            parsed_pred = parse_open_response(response)
-        
-        # Store results
-        result = {
-            'id': sample['id'],
-            'question': sample['question'],
-            'answer': sample['answer'],
-            'question_type': sample['question_type'],
-            'response': response,
-            'parsed_pred': parsed_pred,
-            'prompt': prompt,
-            'subject': sample.get('subject', 'unknown')
-        }
-        results.append(result)
+            responses.append(response)
+        return responses
+    return generate
 
-    return results
 
 def main(args):
     # Load model and tokenizer
@@ -123,74 +85,36 @@ def main(args):
     model, tokenizer = load_model_and_tokenizer(args.model_path)
     
     # Load evaluation config
-    config_path = args.config_path if hasattr(args, 'config_path') else 'eval_config.yaml'
-    if os.path.exists(config_path):
-        config = load_yaml(config_path)
-    else:
-        # Default config
-        config = {
-            'multi_choice_example_format': 'Question: {}\nOptions:\n{}\nAnswer:',
-            'short_ans_example_format': 'Question: {}\nAnswer:',
-            'task_instructions': 'Please answer the following question based on the given information.'
-        }
+    config = load_benchmark_config(args.config_path if hasattr(args, 'config_path') else 'eval_config.yaml')
     
-    # Load MMMU dataset from HuggingFace
-    print(f"Loading MMMU dataset from HuggingFace Hub...")
-    print(f"Split: {args.split}, Subject: {args.subject}")
+    # Load dataset
+    samples = load_benchmark_dataset(split=args.split, subject=args.subject, max_samples=args.max_samples)
     
-    dataset = load_mmmu_dataset(subset=args.split, subject=args.subject)
+    # Create generation function
+    generate_func = hf_generate_func(model, tokenizer)
     
-    # Convert dataset samples to our format
-    samples = []
-    for sample in dataset:
-        samples.append(process_single_sample(sample))
+    # Model info for saving
+    model_info = {
+        'model_path': args.model_path,
+        'split': args.split,
+        'subject': args.subject,
+        'max_samples': args.max_samples
+    }
     
-    # Limit number of samples if specified
-    if args.max_samples > 0:
-        samples = samples[:args.max_samples]
+    # Run benchmark using common logic
+    results = run_benchmark(
+        samples=samples,
+        config=config,
+        args=args,
+        generate_func=generate_func,
+        setup_generation_params_func=None,  # We pass args directly
+        batch_size=1,  # HF processes one at a time
+        subject=args.subject,
+        output_path=args.output_path,
+        model_info=model_info
+    )
     
-    print(f"Processing {len(samples)} samples...")
-    
-    # Process samples
-    results = process_samples(model, tokenizer, samples, config, args)
-    
-    # Evaluate results
-    judge_dict, metrics = evaluate(results)
-    
-    # Print results
-    print("\nEvaluation Results:")
-    print(f"Accuracy: {metrics['acc']:.4f}")
-    
-    # Group results by subject if multiple subjects
-    if args.subject is None:
-        subject_results: Dict[str, List[Dict]] = {}
-        for result in results:
-            subject = result.get('subject', 'unknown')
-            if subject not in subject_results:
-                subject_results[subject] = []
-            subject_results[subject].append(result)
-        
-        print("\nResults by Subject:")
-        for subject, subject_samples in subject_results.items():
-            subject_judge_dict, subject_metrics = evaluate(subject_samples)
-            print(f"{subject}: {subject_metrics['acc']:.4f} ({len(subject_samples)} samples)")
-    
-    # Save results
-    output_path = args.output_path if hasattr(args, 'output_path') else 'benchmark_results.json'
-    with open(output_path, 'w') as f:
-        json.dump({
-            'results': results,
-            'metrics': metrics,
-            'judge_dict': judge_dict,
-            'args': {
-                'model_path': args.model_path,
-                'split': args.split,
-                'subject': args.subject,
-                'max_samples': args.max_samples
-            }
-        }, f, indent=2)
-    
-    print(f"Results saved to {output_path}")
+    return results
 
 def invoke_main() -> None:
     parser = FlexibleArgumentParser(

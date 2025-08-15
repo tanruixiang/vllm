@@ -14,91 +14,28 @@ from datasets import load_dataset
 from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 from data_utils import construct_prompt, load_yaml, process_single_sample, load_mmmu_dataset
-from eval_utils import parse_multi_choice_response, parse_open_response, evaluate
+from eval_utils import (parse_multi_choice_response, parse_open_response, evaluate, 
+                       run_benchmark, load_benchmark_dataset, load_benchmark_config)
 
-
-
-
-
-def process_samples(llm: LLM, samples: List[Dict], config: Dict, args) -> List[Dict]:
-    """Process samples and generate predictions using vLLM"""
-    results = []
-    
-    # Set fixed seed for reproducibility
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    
-    # Create sampling params
-    sampling_params = llm.get_default_sampling_params()
-    if args.max_tokens is not None:
-        sampling_params.max_tokens = args.max_tokens
-    if args.temperature is not None:
-        sampling_params.temperature = args.temperature
-    if args.top_p is not None:
-        sampling_params.top_p = args.top_p
-    if args.top_k is not None:
-        sampling_params.top_k = args.top_k
-    if hasattr(args, 'seed') and args.seed is not None:
-        sampling_params.seed = args.seed
-    
-    # Batch process samples for efficiency
-    batch_size = getattr(args, 'batch_size', 1)
-    
-    for i in range(0, len(samples), batch_size):
-        batch_samples = samples[i:i+batch_size]
-        batch_prompts = []
-        
-        # Prepare batch prompts
-        for sample in batch_samples:
-            prompt_data = construct_prompt(sample, config)
-            prompt = prompt_data['final_input_prompt']
-            batch_prompts.append(prompt)
-            
-            # Store prompt data for later use
-            sample['_prompt_data'] = prompt_data
-            sample['_prompt'] = prompt
-        
-        print(f"Processing batch {i//batch_size + 1}/{(len(samples) + batch_size - 1)//batch_size} "
-              f"(samples {i+1}-{min(i+batch_size, len(samples))}/{len(samples)})")
-        
-        # Generate responses
-        outputs = llm.generate(batch_prompts, sampling_params)
-        
-        # Process outputs
-        for j, output in enumerate(outputs):
-            sample = batch_samples[j]
+def vllm_generate_func(llm: LLM):
+    """Create a generation function for vLLM that matches the common interface"""
+    def generate(prompts: List[str], generation_params) -> List[str]:
+        """Generate responses using vLLM"""
+        # Use the generation_params which is the sampling_params object
+        outputs = llm.generate(prompts, generation_params)
+        responses = []
+        for output in outputs:
             response = output.outputs[0].text.strip()
-            prompt_data = sample['_prompt_data']
-            
-            # Parse response based on question type
-            if sample['question_type'] == 'multiple-choice':
-                parsed_pred = parse_multi_choice_response(
-                    response, 
-                    prompt_data['all_choices'], 
-                    prompt_data['index2ans']
-                )
-            else:
-                parsed_pred = parse_open_response(response)
-            
-            # Store results
-            result = {
-                'id': sample['id'],
-                'question': sample['question'],
-                'answer': sample['answer'],
-                'question_type': sample['question_type'],
-                'response': response,
-                'parsed_pred': parsed_pred,
-                'prompt': sample['_prompt'],
-                'subject': sample.get('subject', 'unknown')
-            }
-            results.append(result)
-        
-        # Clean up memory periodically
-        if i % (batch_size * 10) == 0:
-            gc.collect()
-    
-    print(f"Average generation time: {time_collector.get_average_time():.3f}s")
-    return results
+            responses.append(response)
+        return responses
+    return generate
+
+
+def setup_vllm_generation_params(args):
+    """Setup vLLM sampling parameters from args"""
+    # This will be called with the LLM instance to get default sampling params
+    # We need to modify this to work with the actual LLM instance
+    return args  # For now, return args and handle in the main function
 
 
 def main(args: dict):
@@ -121,87 +58,72 @@ def main(args: dict):
     print(f"Loading vLLM model...")
     llm = LLM(**args)
     
-    # Store sampling parameters for later use
+    # Create sampling params using the LLM instance
+    sampling_params = llm.get_default_sampling_params()
+    if max_tokens is not None:
+        sampling_params.max_tokens = max_tokens
+    if temperature is not None:
+        sampling_params.temperature = temperature
+    if top_p is not None:
+        sampling_params.top_p = top_p
+    if top_k is not None:
+        sampling_params.top_k = top_k
+    if seed is not None:
+        sampling_params.seed = seed
+    
+    # Store args for common benchmark function
     class Args:
         def __init__(self):
+            self.seed = seed
             self.max_tokens = max_tokens
             self.temperature = temperature
             self.top_p = top_p
             self.top_k = top_k
-            self.seed = seed
-            self.batch_size = batch_size
     
-    inference_args = Args()
+    benchmark_args = Args()
     
     # Load evaluation config
-    if os.path.exists(config_path):
-        config = load_yaml(config_path)
-    else:
-        # Default config
-        config = {
-            'multi_choice_example_format': 'Question: {}\nOptions:\n{}\nAnswer:',
-            'short_ans_example_format': 'Question: {}\nAnswer:',
-            'task_instructions': 'Please answer the following question based on the given information.'
-        }
+    config = load_benchmark_config(config_path)
     
-    # Load MMMU dataset from HuggingFace
-    print(f"Loading MMMU dataset from HuggingFace Hub...")
-    print(f"Split: {split}, Subject: {subject}")
+    # Load dataset
+    samples = load_benchmark_dataset(split=split, subject=subject, max_samples=max_samples)
     
-    dataset = load_mmmu_dataset(subset=split, subject=subject)
+    # Create generation function
+    generate_func = vllm_generate_func(llm)
     
-    # Convert dataset samples to our format
-    samples = []
-    for sample in dataset:
-        samples.append(process_single_sample(sample))
+    # Model info for saving
+    model_info = {
+        'model': args.get('model', 'unknown'),
+        'split': split,
+        'subject': subject,
+        'max_samples': max_samples,
+        'batch_size': batch_size
+    }
     
-    # Limit number of samples if specified
-    if max_samples > 0:
-        samples = samples[:max_samples]
+    # Use the common benchmark function, but pass sampling_params directly as generation_params
+    def generate_with_params(prompts: List[str], generation_params) -> List[str]:
+        # Ignore generation_params and use our pre-configured sampling_params
+        outputs = llm.generate(prompts, sampling_params)
+        responses = []
+        for output in outputs:
+            response = output.outputs[0].text.strip()
+            responses.append(response)
+        return responses
     
-    print(f"Processing {len(samples)} samples...")
+    # Run benchmark
+    results = run_benchmark(
+        samples=samples,
+        config=config,
+        args=benchmark_args,
+        generate_func=generate_with_params,
+        setup_generation_params_func=None,  # We handle params ourselves
+        batch_size=batch_size,
+        subject=subject,
+        output_path=output_path,
+        model_info=model_info
+    )
     
-    # Process samples
-    results = process_samples(llm, samples, config, inference_args)
-    
-    # Evaluate results
-    judge_dict, metrics = evaluate(results)
-    
-    # Print results
-    print("\nEvaluation Results:")
-    print(f"Accuracy: {metrics['acc']:.4f}")
-    
-    # Group results by subject if multiple subjects
-    if subject is None:
-        subject_results: Dict[str, List[Dict]] = {}
-        for result in results:
-            subj = result.get('subject', 'unknown')
-            if subj not in subject_results:
-                subject_results[subj] = []
-            subject_results[subj].append(result)
-        
-        print("\nResults by Subject:")
-        for subj, subject_samples in subject_results.items():
-            subject_judge_dict, subject_metrics = evaluate(subject_samples)
-            print(f"{subj}: {subject_metrics['acc']:.4f} ({len(subject_samples)} samples)")
-    
-    # Save results
-    with open(output_path, 'w') as f:
-        json.dump({
-            'results': results,
-            'metrics': metrics,
-            'judge_dict': judge_dict,
-            'args': {
-                'model': args.get('model', 'unknown'),
-                'split': split,
-                'subject': subject,
-                'max_samples': max_samples,
-                'seed': seed,
-                'batch_size': batch_size
-            }
-        }, f, indent=2)
-    
-    print(f"Results saved to {output_path}")
+    return results
 
 
 def create_parser():

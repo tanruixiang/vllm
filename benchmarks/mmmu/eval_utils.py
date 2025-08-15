@@ -1,10 +1,14 @@
 """Response Parsing and Evaluation for various models"""
-from typing import Dict
-
+from typing import Dict, List, Callable, Any
+import gc
+import json
+import os
 import re
 import random
+import time
 random.seed(42)
 import numpy as np
+from data_utils import construct_prompt, load_yaml, process_single_sample, load_mmmu_dataset
 
 
 
@@ -256,3 +260,198 @@ def calculate_ins_level_acc(results: Dict):
     if ins_num == 0:
         return 0
     return acc / ins_num
+
+
+# ----------- Common Benchmark Logic -------------
+def run_benchmark(
+    samples: List[Dict],
+    config: Dict,
+    args: Any,
+    generate_func: Callable[[List[str], Any], List[str]],
+    setup_generation_params_func: Callable[[Any], Any] | None = None,
+    batch_size: int = 1,
+    subject: str | None = None,
+    output_path: str = "benchmark_results.json",
+    model_info: Dict | None = None
+) -> Dict:
+    """
+    Common benchmark logic for processing samples and evaluating results.
+    
+    Args:
+        samples: List of dataset samples
+        config: Evaluation configuration
+        args: Arguments object containing generation parameters
+        generate_func: Function that takes (prompts, generation_params) and returns responses
+        setup_generation_params_func: Optional function to setup generation parameters from args
+        batch_size: Batch size for processing
+        subject: Subject name for filtering results
+        output_path: Path to save results
+        model_info: Additional model information to save
+    
+    Returns:
+        Dictionary containing results, metrics, and other information
+    """
+    results = []
+    
+    # Set fixed seed for reproducibility
+    if hasattr(args, 'seed'):
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+    
+    # Setup generation parameters if function provided
+    generation_params = None
+    if setup_generation_params_func is not None:
+        generation_params = setup_generation_params_func(args)
+    else:
+        generation_params = args
+    
+    # Process samples in batches
+    for i in range(0, len(samples), batch_size):
+        batch_samples = samples[i:i+batch_size]
+        batch_prompts = []
+        
+        # Prepare batch prompts
+        for sample in batch_samples:
+            prompt_data = construct_prompt(sample, config)
+            prompt = prompt_data['final_input_prompt']
+            batch_prompts.append(prompt)
+            
+            # Store prompt data for later use
+            sample['_prompt_data'] = prompt_data
+            sample['_prompt'] = prompt
+        
+        print(f"Processing batch {i//batch_size + 1}/{(len(samples) + batch_size - 1)//batch_size} "
+              f"(samples {i+1}-{min(i+batch_size, len(samples))}/{len(samples)})")
+        
+        # Generate responses using the provided function
+        responses = generate_func(batch_prompts, generation_params)
+        
+        # Process outputs
+        for j, response in enumerate(responses):
+            sample = batch_samples[j]
+            prompt_data = sample['_prompt_data']
+            
+            # Parse response based on question type
+            if sample['question_type'] == 'multiple-choice':
+                parsed_pred = parse_multi_choice_response(
+                    response, 
+                    prompt_data['all_choices'], 
+                    prompt_data['index2ans']
+                )
+            else:
+                parsed_pred = parse_open_response(response)
+            
+            # Store results
+            result = {
+                'id': sample['id'],
+                'question': sample['question'],
+                'answer': sample['answer'],
+                'question_type': sample['question_type'],
+                'response': response,
+                'parsed_pred': parsed_pred,
+                'prompt': sample['_prompt'],
+                'subject': sample.get('subject', 'unknown')
+            }
+            results.append(result)
+        
+        # Clean up memory periodically
+        if i % (batch_size * 10) == 0:
+            gc.collect()
+    
+    # Evaluate results
+    judge_dict, metrics = evaluate(results)
+    
+    # Print results
+    print("\nEvaluation Results:")
+    print(f"Accuracy: {metrics['acc']:.4f}")
+    
+    # Group results by subject if multiple subjects
+    if subject is None:
+        subject_results: Dict[str, List[Dict]] = {}
+        for result in results:
+            subj = result.get('subject', 'unknown')
+            if subj not in subject_results:
+                subject_results[subj] = []
+            subject_results[subj].append(result)
+        
+        print("\nResults by Subject:")
+        for subj, subject_samples in subject_results.items():
+            subject_judge_dict, subject_metrics = evaluate(subject_samples)
+            print(f"{subj}: {subject_metrics['acc']:.4f} ({len(subject_samples)} samples)")
+    
+    # Prepare final results
+    final_results = {
+        'results': results,
+        'metrics': metrics,
+        'judge_dict': judge_dict,
+        'args': {}
+    }
+    
+    # Add model info and args
+    if model_info:
+        final_results['args'].update(model_info)
+    
+    if hasattr(args, '__dict__'):
+        # Add relevant args
+        for attr in ['seed', 'max_samples', 'temperature', 'top_p', 'max_tokens', 'max_new_tokens']:
+            if hasattr(args, attr):
+                final_results['args'][attr] = getattr(args, attr)
+    
+    # Save results
+    with open(output_path, 'w') as f:
+        json.dump(final_results, f, indent=2)
+    
+    print(f"Results saved to {output_path}")
+    
+    return final_results
+
+
+def load_benchmark_dataset(split: str = "validation", subject: str | None = None, max_samples: int = -1):
+    """
+    Load and prepare MMMU dataset for benchmarking.
+    
+    Args:
+        split: Dataset split to use
+        subject: Specific subject to evaluate 
+        max_samples: Maximum number of samples to process (-1 for all)
+    
+    Returns:
+        List of processed samples
+    """
+    print(f"Loading MMMU dataset from HuggingFace Hub...")
+    print(f"Split: {split}, Subject: {subject}")
+    
+    dataset = load_mmmu_dataset(subset=split, subject=subject)
+    
+    # Convert dataset samples to our format
+    samples = []
+    for sample in dataset:
+        samples.append(process_single_sample(sample))
+    
+    # Limit number of samples if specified
+    if max_samples > 0:
+        samples = samples[:max_samples]
+    
+    print(f"Processing {len(samples)} samples...")
+    return samples
+
+
+def load_benchmark_config(config_path: str = "eval_config.yaml"):
+    """
+    Load evaluation configuration.
+    
+    Args:
+        config_path: Path to configuration file
+    
+    Returns:
+        Configuration dictionary
+    """
+    if os.path.exists(config_path):
+        return load_yaml(config_path)
+    else:
+        # Default config
+        return {
+            'multi_choice_example_format': 'Question: {}\nOptions:\n{}\nAnswer:',
+            'short_ans_example_format': 'Question: {}\nAnswer:',
+            'task_instructions': 'Please answer the following question based on the given information.'
+        }
