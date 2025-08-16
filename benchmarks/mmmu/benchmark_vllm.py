@@ -66,7 +66,7 @@ def main(args: dict):
 
     # Model info for saving
     model_info = {
-        "model": args.get("model", "unknown"),
+        "model": args.get("model"),
         "split": split,
         "subject": subject,
         "max_samples": max_samples,
@@ -101,14 +101,15 @@ def main(args: dict):
 
 def create_parser():
     parser = FlexibleArgumentParser(
-        description="Benchmark vLLM models on MMMU dataset using offline inference"
+        description="Benchmark vLLM models on MMMU dataset using offline inference",
+        conflict_handler='resolve'
     )
 
-    # Add engine args (this includes model, tensor_parallel_size, etc.)
-    EngineArgs.add_cli_args(parser)
-
-    # Add common benchmark arguments
+    # Add common benchmark arguments first (with default values)
     parser = add_common_benchmark_args(parser, framework="vllm")
+    
+    # Add engine args (this will override conflicting arguments with vLLM defaults)
+    EngineArgs.add_cli_args(parser)
 
     return parser
 

@@ -56,7 +56,6 @@ def generate_response(
 
     # Prepare inputs for vision-language model
     split_prompt = prompt.split("<image 1>")
-    assert len(split_prompt) == 2
     content = [{"type": "text", "text": s} for s in split_prompt]
     content.insert(1, {"type": "image", "image": image} if image is not None else None)
     messages = [
