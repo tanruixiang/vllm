@@ -11,6 +11,65 @@ import numpy as np
 from data_utils import construct_prompt, load_yaml, process_single_sample, load_mmmu_dataset
 
 
+# ----------- Default Configuration -------------
+class BenchmarkDefaults:
+    """Default values for benchmark parameters"""
+    # Dataset parameters
+    SPLIT = "validation"
+    SUBJECT = None
+    MAX_SAMPLES = -1
+    CONFIG_PATH = "eval_config.yaml"
+    
+    # Generation parameters
+    SEED = 42
+    TEMPERATURE = 0.0
+    TOP_P = 0.9
+    TOP_K = None
+    MAX_TOKENS = 512
+    DO_SAMPLE = True
+    
+    # Benchmark parameters
+    BATCH_SIZE = 1
+    OUTPUT_PATH_HF = "benchmark_results_hf.json"
+    OUTPUT_PATH_VLLM = "benchmark_results_vllm.json"
+    
+    # vLLM specific defaults
+    VLLM_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
+    
+    @classmethod
+    def get_common_args_dict(cls):
+        """Get common arguments as a dictionary"""
+        return {
+            'split': cls.SPLIT,
+            'subject': cls.SUBJECT,
+            'max_samples': cls.MAX_SAMPLES,
+            'config_path': cls.CONFIG_PATH,
+            'seed': cls.SEED,
+            'temperature': cls.TEMPERATURE,
+            'top_p': cls.TOP_P,
+            'top_k': cls.TOP_K,
+            'max_tokens': cls.MAX_TOKENS,
+            'do_sample': cls.DO_SAMPLE,
+            'batch_size': cls.BATCH_SIZE
+        }
+    
+    @classmethod
+    def get_hf_args_dict(cls):
+        """Get HuggingFace specific arguments"""
+        args = cls.get_common_args_dict()
+        args['output_path'] = cls.OUTPUT_PATH_HF
+        return args
+    
+    @classmethod
+    def get_vllm_args_dict(cls):
+        """Get vLLM specific arguments"""
+        args = cls.get_common_args_dict()
+        args['model'] = cls.VLLM_MODEL
+        args['top_p'] = cls.TOP_P
+        args['output_path'] = cls.OUTPUT_PATH_VLLM
+        return args
+
+
 
 
 # ----------- Process Multi-choice -------------
@@ -267,8 +326,7 @@ def run_benchmark(
     samples: List[Dict],
     config: Dict,
     args: Any,
-    generate_func: Callable[[List[str], Any], List[str]],
-    setup_generation_params_func: Callable[[Any], Any] | None = None,
+    generate_func: Callable[[List[str]], List[str]],
     batch_size: int = 1,
     subject: str | None = None,
     output_path: str = "benchmark_results.json",
@@ -281,8 +339,7 @@ def run_benchmark(
         samples: List of dataset samples
         config: Evaluation configuration
         args: Arguments object containing generation parameters
-        generate_func: Function that takes (prompts, generation_params) and returns responses
-        setup_generation_params_func: Optional function to setup generation parameters from args
+        generate_func: Function that takes (prompts) and returns responses
         batch_size: Batch size for processing
         subject: Subject name for filtering results
         output_path: Path to save results
@@ -297,13 +354,6 @@ def run_benchmark(
     if hasattr(args, 'seed'):
         random.seed(args.seed)
         np.random.seed(args.seed)
-    
-    # Setup generation parameters if function provided
-    generation_params = None
-    if setup_generation_params_func is not None:
-        generation_params = setup_generation_params_func(args)
-    else:
-        generation_params = args
     
     # Process samples in batches
     for i in range(0, len(samples), batch_size):
@@ -324,7 +374,7 @@ def run_benchmark(
               f"(samples {i+1}-{min(i+batch_size, len(samples))}/{len(samples)})")
         
         # Generate responses using the provided function
-        responses = generate_func(batch_prompts, generation_params)
+        responses = generate_func(batch_prompts)
         
         # Process outputs
         for j, response in enumerate(responses):
@@ -455,3 +505,106 @@ def load_benchmark_config(config_path: str = "eval_config.yaml"):
             'short_ans_example_format': 'Question: {}\nAnswer:',
             'task_instructions': 'Please answer the following question based on the given information.'
         }
+
+
+def add_common_benchmark_args(parser, framework: str = "common"):
+    """
+    Add common benchmark arguments to a parser.
+    
+    Args:
+        parser: ArgumentParser instance
+        framework: "hf", "vllm", or "common"
+    """
+    defaults = BenchmarkDefaults()
+    
+    # Dataset arguments
+    benchmark_group = parser.add_argument_group("Benchmark parameters")
+    benchmark_group.add_argument(
+        "--split",
+        type=str,
+        default=defaults.SPLIT,
+        choices=["validation", "test", "dev"],
+        help="Dataset split to use"
+    )
+    benchmark_group.add_argument(
+        "--subject",
+        type=str,
+        default=defaults.SUBJECT,
+        help="Specific subject to evaluate (e.g., 'Art', 'Biology'). If None, evaluates all subjects"
+    )
+    benchmark_group.add_argument(
+        "--max-samples",
+        type=int,
+        default=defaults.MAX_SAMPLES,
+        help="Maximum number of samples to process (-1 for all)"
+    )
+    benchmark_group.add_argument(
+        "--config-path",
+        type=str,
+        default=defaults.CONFIG_PATH,
+        help="Path to evaluation config file"
+    )
+    benchmark_group.add_argument(
+        "--seed",
+        type=int,
+        default=defaults.SEED,
+        help="Random seed for reproducibility"
+    )
+    
+    # Generation arguments
+    sampling_group = parser.add_argument_group("Generation parameters")
+    sampling_group.add_argument(
+        "--temperature",
+        type=float,
+        default=defaults.TEMPERATURE,
+        help="Temperature for sampling (0.0 = deterministic)"
+    )
+    sampling_group.add_argument(
+        "--max-tokens",
+        type=int,
+        default=defaults.MAX_TOKENS,
+        help="Maximum number of tokens to generate"
+    )
+    sampling_group.add_argument(
+        "--top-p",
+        type=float,
+        default=defaults.TOP_P,
+        help="Top-p (nucleus) sampling parameter"
+    )
+    sampling_group.add_argument(
+        "--top-k",
+        type=int,
+        default=defaults.TOP_K,
+        help="Top-k sampling parameter"
+    )
+    
+    if framework == "hf":
+        # HuggingFace specific args
+        benchmark_group.add_argument(
+            "--output-path",
+            type=str,
+            default=defaults.OUTPUT_PATH_HF,
+            help="Path to save the results"
+        )
+        sampling_group.add_argument(
+            "--do-sample",
+            action="store_true",
+            default=defaults.DO_SAMPLE,
+            help="Whether to use sampling (vs greedy decoding)"
+        )
+    elif framework == "vllm":
+        # vLLM specific args
+        benchmark_group.add_argument(
+            "--output-path",
+            type=str,
+            default=defaults.OUTPUT_PATH_VLLM,
+            help="Path to save the results"
+        )
+        benchmark_group.add_argument(
+            "--batch-size",
+            type=int,
+            default=defaults.BATCH_SIZE,
+            help="Batch size for inference"
+        )
+    
+    return parser

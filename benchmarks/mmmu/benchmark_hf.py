@@ -13,7 +13,8 @@ from datasets import load_dataset
 from typing import Optional
 from data_utils import construct_prompt, load_yaml, process_single_sample, CAT_SHORT2LONG, load_mmmu_dataset
 from eval_utils import (parse_multi_choice_response, parse_open_response, evaluate,
-                       run_benchmark, load_benchmark_dataset, load_benchmark_config)
+                       run_benchmark, load_benchmark_dataset, load_benchmark_config,
+                       BenchmarkDefaults, add_common_benchmark_args)
 from vllm.utils import FlexibleArgumentParser
 
 def load_model_and_tokenizer(model_path: str):
@@ -32,9 +33,9 @@ def load_model_and_tokenizer(model_path: str):
     
     return model, tokenizer
 
-def generate_response(model, tokenizer, prompt: str, max_new_tokens: int = 512, 
-                     temperature: float = 0.7, top_p: float = 0.9, 
-                     do_sample: bool = True, seed: int = 42) -> str:
+def generate_response(model, tokenizer, prompt: str, max_new_tokens: int, 
+                     temperature: float, top_p: float, top_k: Optional[int],
+                     do_sample: bool, seed: int) -> str:
     """Generate response using HuggingFace model"""
     # Set seed for reproducibility
     set_seed(seed)
@@ -49,6 +50,7 @@ def generate_response(model, tokenizer, prompt: str, max_new_tokens: int = 512,
             do_sample=do_sample,
             temperature=temperature,
             top_p=top_p,
+            top_k=top_k,
             pad_token_id=tokenizer.eos_token_id,
             seed=seed if hasattr(model.generation_config, 'seed') else None
         )
@@ -60,9 +62,9 @@ def generate_response(model, tokenizer, prompt: str, max_new_tokens: int = 512,
     
     return response.strip()
 
-def hf_generate_func(model, tokenizer):
+def hf_generate_func(model, tokenizer, generation_params):
     """Create a generation function for HuggingFace models that matches the common interface"""
-    def generate(prompts: List[str], generation_params) -> List[str]:
+    def generate(prompts: List[str]) -> List[str]:
         """Generate responses using HuggingFace model"""
         responses = []
         for prompt in prompts:
@@ -71,6 +73,7 @@ def hf_generate_func(model, tokenizer):
                 max_new_tokens=generation_params.max_new_tokens,
                 temperature=generation_params.temperature,
                 top_p=generation_params.top_p,
+                top_k=generation_params.top_k,
                 do_sample=generation_params.do_sample,
                 seed=generation_params.seed
             )
@@ -91,7 +94,7 @@ def main(args):
     samples = load_benchmark_dataset(split=args.split, subject=args.subject, max_samples=args.max_samples)
     
     # Create generation function
-    generate_func = hf_generate_func(model, tokenizer)
+    generate_func = hf_generate_func(model, tokenizer, args)
     
     # Model info for saving
     model_info = {
@@ -107,7 +110,6 @@ def main(args):
         config=config,
         args=args,
         generate_func=generate_func,
-        setup_generation_params_func=None,  # We pass args directly
         batch_size=1,  # HF processes one at a time
         subject=args.subject,
         output_path=args.output_path,
@@ -126,62 +128,10 @@ def invoke_main() -> None:
         required=True,  
         help="Path to the HuggingFace model",
     )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="validation",
-        choices=["validation", "test", "dev"],
-        help="Dataset split to use"
-    )
-    parser.add_argument(
-        "--subject",
-        type=str,
-        default=None,
-        help="Specific subject to evaluate (e.g., 'Art', 'Biology'). If None, evaluates all subjects"
-    )
-    parser.add_argument(
-        "--max-samples",
-        type=int,
-        default=-1,
-        help="Maximum number of samples to process (-1 for all)"
-    )
-    parser.add_argument(
-        "--output-path",
-        type=str,
-        default="benchmark_results.json",
-        help="Path to save the results"
-    )
-    # 新增参数：固化随机种子和采样参数
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility"
-    )
-    parser.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=512,
-        help="Maximum number of tokens to generate"
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.0,
-        help="Temperature for sampling (0.0 = deterministic)"
-    )
-    parser.add_argument(
-        "--top-p",
-        type=float,
-        default=0.9,
-        help="Top-p (nucleus) sampling parameter"
-    )
-    parser.add_argument(
-        "--do-sample",
-        action="store_true",
-        default=True,
-        help="Whether to use sampling (vs greedy decoding)"
-    )
+    
+    # Add common benchmark arguments
+    parser = add_common_benchmark_args(parser, framework="hf")
+    
     args = parser.parse_args()
     main(args)
 
