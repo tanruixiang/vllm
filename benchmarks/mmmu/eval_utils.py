@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Adapted from
+# https://github.com/MMMU-Benchmark/MMMU
+
 """Response Parsing and Evaluation for various models"""
 import gc
 import json
@@ -402,18 +406,26 @@ def run_benchmark(
         batch_samples = samples[i : i + batch_size]
         batch_prompts = []
 
-        # Prepare batch prompts
+        # Prepare batch prompts and images
+        batch_prompts = []
+        batch_images = []
         for sample in batch_samples:
             prompt_data = construct_prompt(sample, config)
             prompt = prompt_data["final_input_prompt"]
             batch_prompts.append(prompt)
+            batch_images.append(sample.get("image"))  # Get image data if available
 
             # Store prompt data for later use
             sample["_prompt_data"] = prompt_data
             sample["_prompt"] = prompt
 
         # Generate responses using the provided function
-        responses = generate_func(batch_prompts)
+        # Check if generate_func accepts images parameter (for vLLM) or not (for HF)
+        try:
+            responses = generate_func(batch_prompts, batch_images)
+        except TypeError:
+            # Fallback for functions that only accept prompts
+            responses = generate_func(batch_prompts)
 
         # Process outputs
         for j, response in enumerate(responses):

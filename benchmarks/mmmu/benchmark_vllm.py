@@ -10,14 +10,15 @@ from eval_utils import (
 
 from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
+from transformers import AutoTokenizer
 
 
 def main(args: dict):
     # Pop sampling arguments
-    max_tokens = args.pop("max_tokens", None)
-    temperature = args.pop("temperature", None)
-    top_p = args.pop("top_p", None)
-    top_k = args.pop("top_k", None)
+    max_tokens = args.pop("max_tokens")
+    temperature = args.pop("temperature")
+    top_p = args.pop("top_p")
+    top_k = args.pop("top_k")
 
     # Pop benchmark specific arguments
     split = args.pop("split")
@@ -30,7 +31,14 @@ def main(args: dict):
 
     # Create an LLM with remaining args
     print("Loading vLLM model...")
+    args['disable_mm_preprocessor_cache'] = True
+    args['max_model_len'] = 12800
     llm = LLM(**args)
+    
+    # Load tokenizer for chat template
+    model_name = args.get("model")
+    print(f"Loading tokenizer from {model_name}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
     # Create sampling params using the LLM instance
     sampling_params = llm.get_default_sampling_params()
@@ -44,7 +52,7 @@ def main(args: dict):
         sampling_params.top_k = top_k
     if seed is not None:
         sampling_params.seed = seed
-
+    print('Sample args', sampling_params)
     # Store args for common benchmark function
     class Args:
         def __init__(self):
@@ -73,11 +81,48 @@ def main(args: dict):
         "batch_size": batch_size,
     }
 
-    # Use the common benchmark function, but pass sampling_params
-    # directly as generation_params
-    def generate_with_params(prompts: list[str]) -> list[str]:
+    # Create a generation function that matches the HF interface
+    def generate_with_params(prompts: list[str], images: list = None) -> list[str]:
+        """
+        Generate responses for prompts with associated images.
+        Args:
+            prompts: List of prompt strings
+            images: List of image data (can be None for text-only)
+        Returns:
+            List of response strings
+        """
+        # Prepare inputs for vLLM batch inference
+        inputs = []
+        if images is None:
+            images = [None] * len(prompts)
+            
+        for prompt, image in zip(prompts, images):
+            split_prompt = prompt.split("<image 1>")
+            content = [{"type": "text", "text": s} for s in split_prompt]
+            content.insert(1, {"type": "image", "image": image} if image is not None else None)
+            messages = [
+                {
+                    "role": "user",
+                    "content": content
+                }
+            ]
+            try:
+                formatted_prompt = tokenizer.apply_chat_template(
+                    messages, 
+                    tokenize=False, 
+                    add_generation_prompt=True
+                )
+            except Exception as e:
+                print(f"Warning: Failed to apply chat template, using original prompt: {e}")
+                formatted_prompt = prompt
+            
+            input_data = {"prompt": formatted_prompt}
+            if image is not None:
+                input_data["multi_modal_data"] = {"image": image}
+            inputs.append(input_data)
+        
         # Use our pre-configured sampling_params
-        outputs = llm.generate(prompts, sampling_params)
+        outputs = llm.generate(inputs, sampling_params, use_tqdm=False)
         responses = []
         for output in outputs:
             response = output.outputs[0].text.strip()

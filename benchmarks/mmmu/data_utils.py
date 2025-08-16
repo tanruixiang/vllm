@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Adapted from
+# https://github.com/MMMU-Benchmark/MMMU
+
 """Utils for data load, save, and process (e.g., prompt construction)"""
 
 import json
