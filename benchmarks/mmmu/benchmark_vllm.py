@@ -1,22 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import gc
-import json
-import os
-import random
-import time
-from typing import List, Dict, Optional
-
-import numpy as np
-from datasets import load_dataset
+from eval_utils import (
+    BenchmarkDefaults,
+    add_common_benchmark_args,
+    load_benchmark_config,
+    load_benchmark_dataset,
+    run_benchmark,
+)
 
 from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
-from data_utils import construct_prompt, load_yaml, process_single_sample, load_mmmu_dataset
-from eval_utils import (parse_multi_choice_response, parse_open_response, evaluate, 
-                       run_benchmark, load_benchmark_dataset, load_benchmark_config,
-                       BenchmarkDefaults, add_common_benchmark_args)
+
 
 def main(args: dict):
     # Pop sampling arguments
@@ -24,7 +19,7 @@ def main(args: dict):
     temperature = args.pop("temperature", None)
     top_p = args.pop("top_p", None)
     top_k = args.pop("top_k", None)
-    
+
     # Pop benchmark specific arguments
     split = args.pop("split")
     subject = args.pop("subject")
@@ -33,11 +28,11 @@ def main(args: dict):
     config_path = args.pop("config_path")
     seed = args.pop("seed")
     batch_size = args.pop("batch_size")
-    
+
     # Create an LLM with remaining args
-    print(f"Loading vLLM model...")
+    print("Loading vLLM model...")
     llm = LLM(**args)
-    
+
     # Create sampling params using the LLM instance
     sampling_params = llm.get_default_sampling_params()
     if max_tokens is not None:
@@ -50,7 +45,7 @@ def main(args: dict):
         sampling_params.top_k = top_k
     if seed is not None:
         sampling_params.seed = seed
-    
+
     # Store args for common benchmark function
     class Args:
         def __init__(self):
@@ -59,26 +54,29 @@ def main(args: dict):
             self.temperature = temperature
             self.top_p = top_p
             self.top_k = top_k
-    
+
     benchmark_args = Args()
-    
+
     # Load evaluation config
     config = load_benchmark_config(config_path)
-    
+
     # Load dataset
-    samples = load_benchmark_dataset(split=split, subject=subject, max_samples=max_samples)
-    
+    samples = load_benchmark_dataset(
+        split=split, subject=subject, max_samples=max_samples
+    )
+
     # Model info for saving
     model_info = {
-        'model': args.get('model', 'unknown'),
-        'split': split,
-        'subject': subject,
-        'max_samples': max_samples,
-        'batch_size': batch_size
+        "model": args.get("model", "unknown"),
+        "split": split,
+        "subject": subject,
+        "max_samples": max_samples,
+        "batch_size": batch_size,
     }
-    
-    # Use the common benchmark function, but pass sampling_params directly as generation_params
-    def generate_with_params(prompts: List[str]) -> List[str]:
+
+    # Use the common benchmark function, but pass sampling_params
+    # directly as generation_params
+    def generate_with_params(prompts: list[str]) -> list[str]:
         # Use our pre-configured sampling_params
         outputs = llm.generate(prompts, sampling_params)
         responses = []
@@ -86,7 +84,7 @@ def main(args: dict):
             response = output.outputs[0].text.strip()
             responses.append(response)
         return responses
-    
+
     # Run benchmark
     results = run_benchmark(
         samples=samples,
@@ -96,9 +94,9 @@ def main(args: dict):
         batch_size=batch_size,
         subject=subject,
         output_path=output_path,
-        model_info=model_info
+        model_info=model_info,
     )
-    
+
     return results
 
 
@@ -106,14 +104,14 @@ def create_parser():
     parser = FlexibleArgumentParser(
         description="Benchmark vLLM models on MMMU dataset using offline inference"
     )
-    
+
     # Add engine args (this includes model, tensor_parallel_size, etc.)
     EngineArgs.add_cli_args(parser)
     parser.set_defaults(model=BenchmarkDefaults.VLLM_MODEL)
-    
+
     # Add common benchmark arguments
     parser = add_common_benchmark_args(parser, framework="vllm")
-    
+
     return parser
 
 
