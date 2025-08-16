@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, List
 
 import torch
 from eval_utils import (
@@ -9,77 +9,119 @@ from eval_utils import (
     load_benchmark_dataset,
     run_benchmark,
 )
-from transformers import AutoModel, AutoTokenizer, set_seed
+from transformers import AutoProcessor, AutoModel, AutoModelForCausalLM, set_seed
 
 from vllm.utils import FlexibleArgumentParser
 
 
-def load_model_and_tokenizer(model: str):
-    """Load HuggingFace model and tokenizer"""
-    tokenizer = AutoTokenizer.from_pretrained(model)
-    model = AutoModel.from_pretrained(
-        model, torch_dtype="auto", trust_remote_code=True
-    )
+def load_model_and_tokenizer(model_name: str):
+    """Load HuggingFace Vision-Language model and processor"""
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+    
+    # Try different auto classes commonly used for VL models
+    model = None
+    for auto_class in [AutoModel, AutoModelForCausalLM]:
+        try:
+            model = auto_class.from_pretrained(
+                model_name, torch_dtype="auto", trust_remote_code=True
+            )
+            print(f"Successfully loaded model with {auto_class.__name__}")
+            break
+        except Exception:
+            continue
+    
+    if model is None:
+        raise ValueError(f"Could not load model {model_name} with any available auto class")
+    
     model = model.eval().cuda()
 
-    # Set pad token if not exists
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    return model, tokenizer
+    return model, processor
 
 
 def generate_response(
     model,
-    tokenizer,
+    processor,
     prompt: str,
-    max_new_tokens: int,
+    image,
+    max_tokens: int,
     temperature: float,
     top_p: float,
     top_k: Optional[int],
     do_sample: bool,
     seed: int,
 ) -> str:
-    """Generate response using HuggingFace model"""
+    """Generate response using HuggingFace Vision-Language model"""
     # Set seed for reproducibility
     set_seed(seed)
 
-    inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    # Prepare inputs for vision-language model
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image} if image is not None else None,
+                {"type": "text", "text": prompt},
+            ]
+        }
+    ]
+    
+    # Filter out None content
+    if image is None:
+        messages[0]["content"] = [{"type": "text", "text": prompt}]
+    
+    # Apply chat template
+    text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    
+    # Process inputs
+    inputs = processor(
+        text=[text], 
+        images=[image] if image is not None else None, 
+        return_tensors="pt",
+        padding=True
+    )
+    inputs = inputs.to(model.device)
 
     with torch.no_grad():
-        outputs = model.generate(
+        generated_ids = model.generate(
             **inputs,
-            max_new_tokens=max_new_tokens,
+            max_new_tokens=max_tokens,
             do_sample=do_sample,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
-            pad_token_id=tokenizer.eos_token_id,
-            seed=seed if hasattr(model.generation_config, "seed") else None,
         )
 
-    # Decode only the new tokens
-    input_length = inputs["input_ids"].shape[1]
-    generated_tokens = outputs[0][input_length:]
-    response = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+    # Extract generated tokens (excluding input tokens)
+    generated_ids_trimmed = [
+        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
+    
+    response = processor.batch_decode(
+        generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )[0]
 
     return response.strip()
 
 
-def hf_generate_func(model, tokenizer, generation_params):
-    """Create a generation function for HuggingFace models
+def hf_generate_func(model, processor, generation_params):
+    """Create a generation function for HuggingFace VL models
         that matches the common interface"""
 
-    def generate(prompts: list[str]) -> list[str]:
-        """Generate responses using HuggingFace model"""
+    def generate(prompts: List[str], images: Optional[List] = None) -> List[str]:
+        """Generate responses using HuggingFace VL model"""
         responses = []
-        for prompt in prompts:
+        if images is None:
+            images = [None] * len(prompts)
+        
+        for prompt, image in zip(prompts, images):
             response = generate_response(
                 model,
-                tokenizer,
+                processor,
                 prompt,
-                max_new_tokens=generation_params.max_new_tokens,
+                image,
+                max_tokens=generation_params.max_tokens,
                 temperature=generation_params.temperature,
                 top_p=generation_params.top_p,
                 top_k=generation_params.top_k,
@@ -93,9 +135,9 @@ def hf_generate_func(model, tokenizer, generation_params):
 
 
 def main(args):
-    # Load model and tokenizer
+    # Load model and processor
     print(f"Loading model from {args.model}...")
-    model, tokenizer = load_model_and_tokenizer(args.model)
+    model, processor = load_model_and_tokenizer(args.model)
 
     # Load evaluation config
     config = load_benchmark_config(
@@ -108,7 +150,7 @@ def main(args):
     )
 
     # Create generation function
-    generate_func = hf_generate_func(model, tokenizer, args)
+    generate_func = hf_generate_func(model, processor, args)
 
     # Model info for saving
     model_info = {
