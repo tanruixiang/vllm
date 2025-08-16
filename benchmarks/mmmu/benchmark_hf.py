@@ -9,7 +9,7 @@ from eval_utils import (
     load_benchmark_dataset,
     run_benchmark,
 )
-from transformers import AutoProcessor, AutoModel, AutoModelForCausalLM, set_seed
+from transformers import AutoProcessor, AutoModelForImageTextToText, set_seed
 
 from vllm.utils import FlexibleArgumentParser
 
@@ -20,7 +20,7 @@ def load_model_and_tokenizer(model_name: str):
     
     # Try different auto classes commonly used for VL models
     model = None
-    for auto_class in [AutoModel, AutoModelForCausalLM]:
+    for auto_class in [AutoModelForImageTextToText]:
         try:
             model = auto_class.from_pretrained(
                 model_name, torch_dtype="auto", trust_remote_code=True
@@ -55,13 +55,14 @@ def generate_response(
     set_seed(seed)
 
     # Prepare inputs for vision-language model
+    split_prompt = prompt.split("<image 1>")
+    assert len(split_prompt) == 2
+    content = [{"type": "text", "text": s} for s in split_prompt]
+    content.insert(1, {"type": "image", "image": image} if image is not None else None)
     messages = [
         {
             "role": "user",
-            "content": [
-                {"type": "image", "image": image} if image is not None else None,
-                {"type": "text", "text": prompt},
-            ]
+            "content": content
         }
     ]
     
