@@ -87,17 +87,11 @@ def load_mmmu_dataset(subset: str = "validation", subject: Optional[str] = None)
     else:
         # Load all subjects and combine them
         available_subjects = list(CAT_SHORT2LONG.values())
-        # Load first subject
-        dataset = load_dataset("MMMU/MMMU", available_subjects[0], split=subset)
-
-        # Load and concatenate other subjects
-        from datasets import concatenate_datasets
-
         datasets_list = []
         for subj in available_subjects:
             subj_dataset = load_dataset("MMMU/MMMU", subj, split=subset)
             datasets_list.append(subj_dataset)
-
+        from datasets import concatenate_datasets
         dataset = concatenate_datasets(datasets_list)
 
     return dataset

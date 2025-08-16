@@ -8,6 +8,8 @@ import random
 import re
 from typing import Any, Callable
 
+from tqdm import tqdm
+
 import numpy as np
 from data_utils import (
     construct_prompt,
@@ -29,7 +31,7 @@ class BenchmarkDefaults:
 
     # Generation parameters
     SEED = 42
-    TEMPERATURE = 0.0
+    TEMPERATURE = 0.01
     TOP_P = 0.9
     TOP_K = None
     MAX_TOKENS = 512
@@ -204,7 +206,7 @@ def parse_open_response(response):
 
     # content = content.strip("\n").strip(".").strip(" ")
     def get_key_subresponses(response):
-        key_responses = []
+        key_responses: list[str] = []
         response = response.strip().strip(".").lower()
         sub_responses = re.split(r"\.\s(?=[A-Z])|\n", response)
         indicators_of_keys = [
@@ -392,7 +394,11 @@ def run_benchmark(
         np.random.seed(args.seed)
 
     # Process samples in batches
-    for i in range(0, len(samples), batch_size):
+    batch_count = (len(samples) + batch_size - 1) // batch_size
+    for i in tqdm(range(0, len(samples), batch_size), 
+                  desc="Processing batches", 
+                  total=batch_count,
+                  unit="batch"):
         batch_samples = samples[i : i + batch_size]
         batch_prompts = []
 
@@ -405,12 +411,6 @@ def run_benchmark(
             # Store prompt data for later use
             sample["_prompt_data"] = prompt_data
             sample["_prompt"] = prompt
-
-        print(
-            f"Processing batch {i // batch_size + 1} \
-            /{(len(samples) + batch_size - 1) // batch_size} "
-            f"(samples {i + 1}-{min(i + batch_size, len(samples))}/{len(samples)})"
-        )
 
         # Generate responses using the provided function
         responses = generate_func(batch_prompts)
