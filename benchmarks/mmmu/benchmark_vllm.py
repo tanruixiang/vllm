@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from eval_utils import (
-    BenchmarkDefaults,
     add_common_benchmark_args,
     load_benchmark_config,
     load_benchmark_dataset,
@@ -107,7 +106,6 @@ def create_parser():
 
     # Add engine args (this includes model, tensor_parallel_size, etc.)
     EngineArgs.add_cli_args(parser)
-    parser.set_defaults(model=BenchmarkDefaults.VLLM_MODEL)
 
     # Add common benchmark arguments
     parser = add_common_benchmark_args(parser, framework="vllm")

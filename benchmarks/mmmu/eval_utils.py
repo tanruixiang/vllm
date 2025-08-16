@@ -41,7 +41,7 @@ class BenchmarkDefaults:
     OUTPUT_PATH_VLLM = "benchmark_results_vllm.json"
 
     # vLLM specific defaults
-    VLLM_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
+    MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 
     @classmethod
     def get_common_args_dict(cls):
@@ -71,7 +71,7 @@ class BenchmarkDefaults:
     def get_vllm_args_dict(cls):
         """Get vLLM specific arguments"""
         args = cls.get_common_args_dict()
-        args["model"] = cls.VLLM_MODEL
+        args["model"] = cls.MODEL
         args["top_p"] = cls.TOP_P
         args["output_path"] = cls.OUTPUT_PATH_VLLM
         return args
@@ -545,15 +545,20 @@ def load_benchmark_config(config_path: str = "eval_config.yaml"):
         Configuration dictionary
     """
     if os.path.exists(config_path):
-        return load_yaml(config_path)
+        config = load_yaml(config_path)
     else:
         # Default config
-        return {
+        config = {
             "multi_choice_example_format": "Question: {}\nOptions:\n{}\nAnswer:",
             "short_ans_example_format": "Question: {}\nAnswer:",
             "task_instructions": "Please answer the following\
                 question based on the given information.",
         }
+    for key, value in config.items():
+        if key != 'eval_params' and isinstance(value, list):
+            assert len(value) == 1, 'key {} has more than one value'.format(key)
+            config[key] = value[0]
+    return config
 
 
 def add_common_benchmark_args(parser, framework: str = "common"):
@@ -568,6 +573,12 @@ def add_common_benchmark_args(parser, framework: str = "common"):
 
     # Dataset arguments
     benchmark_group = parser.add_argument_group("Benchmark parameters")
+    benchmark_group.add_argument(
+        "--model",
+        type=str,
+        default=defaults.MODEL,
+        help="model name"
+    )
     benchmark_group.add_argument(
         "--split",
         type=str,

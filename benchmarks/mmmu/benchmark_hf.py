@@ -14,11 +14,11 @@ from transformers import AutoModel, AutoTokenizer, set_seed
 from vllm.utils import FlexibleArgumentParser
 
 
-def load_model_and_tokenizer(model_path: str):
+def load_model_and_tokenizer(model: str):
     """Load HuggingFace model and tokenizer"""
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model)
     model = AutoModel.from_pretrained(
-        model_path, torch_dtype="auto", trust_remote_code=True
+        model, torch_dtype="auto", trust_remote_code=True
     )
     model = model.eval().cuda()
 
@@ -94,8 +94,8 @@ def hf_generate_func(model, tokenizer, generation_params):
 
 def main(args):
     # Load model and tokenizer
-    print(f"Loading model from {args.model_path}...")
-    model, tokenizer = load_model_and_tokenizer(args.model_path)
+    print(f"Loading model from {args.model}...")
+    model, tokenizer = load_model_and_tokenizer(args.model)
 
     # Load evaluation config
     config = load_benchmark_config(
@@ -112,7 +112,7 @@ def main(args):
 
     # Model info for saving
     model_info = {
-        "model_path": args.model_path,
+        "model": args.model,
         "split": args.split,
         "subject": args.subject,
         "max_samples": args.max_samples,
@@ -136,12 +136,6 @@ def main(args):
 def invoke_main() -> None:
     parser = FlexibleArgumentParser(
         description="Benchmark HuggingFace models on MMMU dataset from HuggingFace Hub"
-    )
-    parser.add_argument(
-        "--model-path",
-        type=str,
-        required=True,
-        help="Path to the HuggingFace model",
     )
 
     # Add common benchmark arguments
