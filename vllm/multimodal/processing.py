@@ -525,6 +525,20 @@ class _TokenMatch(NamedTuple):
     start_idx: int
     end_idx: int
 
+def _compute_lps_array(match_ids: list[int]) -> list[int]:
+    """
+    Computes the Longest Proper Prefix which is also a Suffix (LPS) array for KMP.
+    """
+    n = len(match_ids)
+    lps = [0] * n
+    j = 0
+    for i in range(1, n):
+        while j > 0 and match_ids[i] != match_ids[j]:
+            j = lps[j - 1]
+        if match_ids[i] == match_ids[j]:
+            j += 1
+        lps[i] = j
+    return lps
 
 def iter_token_matches(
     token_ids: list[int],
@@ -534,24 +548,35 @@ def iter_token_matches(
     Yield each occurrence of `match_ids` in `token_ids`.
 
     Note that empty matches are ignored.
-    """
-    prompt_len = len(token_ids)
-    match_len = len(match_ids)
 
-    if match_len == 0:
+    Using KMP (Knuth-Morris-Pratt) algorithm for efficient matching.
+    """
+    n = len(token_ids)
+    m = len(match_ids)
+
+    if m == 0:
         return
 
-    start_idx = 0
-    while start_idx < prompt_len - match_len + 1:
-        end_idx = start_idx + match_len
+    lps = _compute_lps_array(match_ids)
 
-        if token_ids[start_idx:end_idx] == match_ids:
+    i = 0  # pointer for token_ids
+    j = 0  # pointer for match_ids
+
+    while i < n:
+        if match_ids[j] == token_ids[i]:
+            i += 1
+            j += 1
+
+        if j == m:
+            start_idx = i - j
+            end_idx = i
             yield _TokenMatch(start_idx=start_idx, end_idx=end_idx)
-
-            # Exclude overlapping matches
-            start_idx = end_idx
-        else:
-            start_idx += 1
+            j = 0
+        elif i < n and match_ids[j] != token_ids[i]:
+            if j != 0:
+                j = lps[j - 1]
+            else:
+                i += 1
 
 
 def replace_token_matches(
