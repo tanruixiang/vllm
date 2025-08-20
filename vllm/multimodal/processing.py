@@ -7,6 +7,7 @@ from collections.abc import (Callable, Generator, ItemsView, Iterable, Mapping,
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
+import time
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
@@ -1050,6 +1051,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # Avoid unnecessary recomputation
         self._supported_mm_limits = self.info.get_supported_mm_limits()
         self._allowed_mm_limits = self.info.get_allowed_mm_limits()
+        
+        # 累计总耗时统计
+        self._apply_prompt_updates_total_time = 0.0
+        self._apply_prompt_updates_call_count = 0
 
     @property
     def supported_mm_limits(self):
@@ -1066,6 +1071,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputs:
         return self.apply(prompt, mm_data, hf_processor_mm_kwargs)
+
+    def __del__(self):
+        """
+        析构函数：在对象销毁时打印_apply_prompt_updates函数的累计统计信息
+        """
+        if hasattr(self, '_apply_prompt_updates_call_count') and self._apply_prompt_updates_call_count > 0:
+            logger.info(f"BaseMultiModalProcessor destroyed - _apply_prompt_updates stats: "
+                       f"total_time={self._apply_prompt_updates_total_time:.6f}s, "
+                       f"call_count={self._apply_prompt_updates_call_count}, "
+                       f"average_time={self._apply_prompt_updates_total_time/self._apply_prompt_updates_call_count:.6f}s")
 
     def _get_data_parser(self) -> MultiModalDataParser:
         """
@@ -1578,11 +1593,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_item_counts: Mapping[str, int],
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
         tokenizer = self.info.get_tokenizer()
-
+        start_time = time.perf_counter()
         mm_token_matches = {
             modality: find_token_matches(token_ids, updates)
             for modality, updates in mm_prompt_updates.items()
         }
+        end_time = time.perf_counter()
+        execution_time = end_time - start_time
+        
+        # 累计统计总耗时和调用次数
+        self._apply_prompt_updates_total_time += execution_time
+        self._apply_prompt_updates_call_count += 1
+
         mm_match_counts = {
             modality: len(matches)
             for modality, matches in mm_token_matches.items()
